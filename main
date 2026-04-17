@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+import argparse
+import urllib.request
+import urllib.error
+import ssl
+import sys
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": {
+        "description": "CSP prevents XSS and data injection attacks",
+        "weight": 25,
+    },
+    "Strict-Transport-Security": {
+        "description": "HSTS forces HTTPS connections",
+        "weight": 20,
+    },
+    "X-Frame-Options": {
+        "description": "Prevents clickjacking attacks",
+        "weight": 15,
+    },
+    "X-Content-Type-Options": {
+        "description": "Prevents MIME type sniffing",
+        "weight": 10,
+    },
+    "X-XSS-Protection": {
+        "description": "Legacy XSS protection (deprecated but still checked)",
+        "weight": 5,
+    },
+    "Referrer-Policy": {
+        "description": "Controls referrer information sharing",
+        "weight": 10,
+    },
+    "Permissions-Policy": {
+        "description": "Controls browser feature access",
+        "weight": 10,
+    },
+    "Cross-Origin-Embedder-Policy": {
+        "description": "Controls resource embedding",
+        "weight": 2.5,
+    },
+    "Cross-Origin-Opener-Policy": {
+        "description": "Isolates browsing context",
+        "weight": 2.5,
+    },
+}
+
+
+def check_headers(url: str, timeout: int = 10) -> tuple[dict, float]:
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    headers_found = {}
+    max_score = sum(h["weight"] for h in SECURITY_HEADERS.values())
+    score = max_score
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    req = urllib.request.Request(url, headers={"User-Agent": "SecurityHeaderChecker/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+            response_headers = dict(response.headers)
+    except urllib.error.HTTPError as e:
+        response_headers = dict(e.headers)
+    except urllib.error.URLError as e:
+        print(f"[ERROR] Failed to connect: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    for header, info in SECURITY_HEADERS.items():
+        header_lower = header.lower()
+        found = any(header_lower == h.lower() for h in response_headers.keys())
+        headers_found[header] = {
+            "found": found,
+            "value": response_headers.get(header) or response_headers.get(header.replace("-", "_")),
+            "description": info["description"],
+            "weight": info["weight"],
+        }
+        if not found:
+            score -= info["weight"]
+
+    return headers_found, score
+
+
+def print_report(url: str, headers_found: dict, score: float, max_score: float):
+    pct = (score / max_score) * 100
+    grade = "A+" if pct >= 95 else "A" if pct >= 90 else "B" if pct >= 80 else "C" if pct >= 70 else "D" if pct >= 60 else "F"
+
+    print(f"\n{'='*60}")
+    print(f" Security Header Report: {url}")
+    print(f"{'='*60}")
+    print(f"\n  Score: {score:.1f}/{max_score:.1f} ({pct:.1f}%)  Grade: {grade}\n")
+
+    print(f"  {'Header':<35} {'Status':<10} {'Value'}")
+    print(f"  {'-'*35} {'-'*10} {'-'*20}")
+
+    for header, info in headers_found.items():
+        status = "[PASS]" if info["found"] else "[MISS]"
+        value = (info["value"][:50] + "..." if len(info["value"]) > 50 else info["value"]) if info["found"] else "-"
+        print(f"  {header:<35} {status:<10} {value}")
+
+    print(f"\n{'='*60}")
+
+    if pct < 80:
+        print("\n  Recommendations:")
+        for header, info in headers_found.items():
+            if not info["found"]:
+                print(f"  - Add {header}: {info['description']}")
+    print()
+
+
+def run_gui():
+    def check_url():
+        url = url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Input Required", "Please enter a URL")
+            return
+
+        for widget in results_frame.winfo_children():
+            widget.destroy()
+
+        result_label = tk.Label(results_frame, text="Scanning...", font=("Arial", 10))
+        result_label.pack(pady=10)
+        results_frame.update()
+
+        try:
+            headers_found, score = check_headers(url)
+            max_score = sum(h["weight"] for h in SECURITY_HEADERS.values())
+            pct = (score / max_score) * 100
+            grade = "A+" if pct >= 95 else "A" if pct >= 90 else "B" if pct >= 80 else "C" if pct >= 70 else "D" if pct >= 60 else "F"
+
+            result_label.destroy()
+
+            score_label = tk.Label(results_frame, text=f"Score: {score:.1f}/{max_score:.1f} ({pct:.1f}%)  Grade: {grade}", 
+                                   font=("Arial", 12, "bold"))
+            score_label.pack(pady=5)
+
+            tree = ttk.Treeview(results_frame, columns=("Header", "Status", "Value"), show="headings", height=10)
+            tree.heading("Header", text="Header")
+            tree.heading("Status", text="Status")
+            tree.heading("Value", text="Value")
+            tree.column("Header", width=250)
+            tree.column("Status", width=80)
+            tree.column("Value", width=300)
+            tree.pack(pady=10, fill="both", expand=True)
+
+            for header, info in headers_found.items():
+                status = "PASS" if info["found"] else "MISS"
+                value = info["value"] if info["found"] else "-"
+                tag = "pass" if info["found"] else "miss"
+                tree.insert("", "end", values=(header, status, value), tags=(tag,))
+
+            tree.tag_configure("pass", background="#90EE90")
+            tree.tag_configure("miss", background="#FFB6C1")
+
+        except Exception as e:
+            result_label.destroy()
+            messagebox.showerror("Error", str(e))
+
+    root = tk.Tk()
+    root.title("Security Header Checker")
+    root.geometry("700x500")
+    root.resizable(True, True)
+
+    input_frame = tk.Frame(root, pady=20)
+    input_frame.pack(fill="x")
+
+    tk.Label(input_frame, text="Enter URL:", font=("Arial", 11)).pack(side="left", padx=5)
+    url_entry = tk.Entry(input_frame, width=50, font=("Arial", 11))
+    url_entry.pack(side="left", padx=5)
+    url_entry.focus()
+
+    check_btn = tk.Button(input_frame, text="Check", command=check_url, font=("Arial", 11), bg="#4CAF50", fg="white", padx=20)
+    check_btn.pack(side="left", padx=5)
+
+    results_frame = tk.Frame(root)
+    results_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    root.bind("<Return>", lambda e: check_url())
+    root.mainloop()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Check HTTP security headers on websites")
+    parser.add_argument("url", nargs="?", help="Website URL to check")
+    parser.add_argument("-t", "--timeout", type=int, default=10, help="Request timeout in seconds")
+    parser.add_argument("--cli", action="store_true", help="Force CLI mode")
+    args = parser.parse_args()
+
+    if args.url and not args.cli:
+        headers_found, score = check_headers(args.url, args.timeout)
+        print_report(args.url, headers_found, score, sum(h["weight"] for h in SECURITY_HEADERS.values()))
+    else:
+        run_gui()
+
+
+if __name__ == "__main__":
+    main()
